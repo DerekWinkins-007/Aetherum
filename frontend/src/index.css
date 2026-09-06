@@ -1,0 +1,20 @@
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  overscroll-behavior: none;
+}
+
+::-webkit-scrollbar {
+  display: none;
+}
+
+.scanlines {
+  background:
+    linear-gradient(rgba(17, 19, 25, 0) 50%, rgba(0, 0, 0, 0.4) 50%),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.01), rgba(0, 0, 0, 0.05));
+  background-size: 100% 4px, 6px 100%;
+  pointer-events: none;
+}
