@@ -143,7 +143,7 @@ Landing on a Mythic pull (Luxaris, the Eternal Radiance) on the very first summo
 
 ## Deployed Link
 
-*(Add your live Vercel URL here once deployed — see deployment steps below.)*
+Live app: https://aetherum-rosy.vercel.app
 
 ---
 
