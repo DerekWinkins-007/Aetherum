@@ -179,7 +179,7 @@ function MarketCardTile({ card, priceLabel, actionLabel, disabled, onAction }) {
 function GrimoireCardTile({ item, onList, onDelist, account, disabled }) {
   const card = cardFromMetadata(item.metadata);
   const color = classColors[card.class] || "#e2e2ea";
-  const [price, setPrice] = useState("0.20");
+  const [price, setPrice] = useState("");
   const isListed = !!item.listing;
 
   return (
@@ -218,9 +218,10 @@ function GrimoireCardTile({ item, onList, onDelist, account, disabled }) {
           <div className="flex items-center gap-step-2">
             <div className="flex-1 bg-surface-container-lowest px-step-3 py-step-2 shadow-[inset_2px_2px_0px_#0c0e14,inset_-1px_-1px_0px_#33353b] flex items-center justify-between">
               <input
-                className="bg-transparent text-primary font-headline-sm text-headline-sm focus:outline-none w-16 uppercase"
+                className="bg-transparent text-on-surface font-body-sm text-body-sm focus:outline-none w-20 placeholder:text-on-surface-variant placeholder:opacity-60"
                 type="text"
                 value={price}
+                placeholder="Enter price"
                 onChange={(e) => setPrice(e.target.value)}
               />
               <span className="font-label-sm text-label-sm text-on-surface-variant">ETH</span>
@@ -318,6 +319,7 @@ export default function App() {
   const [statusMsg, setStatusMsg] = useState("");
   const [revealedCards, setRevealedCards] = useState(null);
   const [summonAmount, setSummonAmount] = useState(1);
+  const [estimatedValue, setEstimatedValue] = useState(0n);
 
   async function connectWallet() {
     if (!window.ethereum) return alert("Please install MetaMask to use Aetherum.");
@@ -386,6 +388,7 @@ export default function App() {
     try {
       const { cardContract, marketplaceContract } = getContracts(signer);
       const owned = [];
+      let totalValue = 0n;
       for (let tokenId = 0; tokenId < 1000; tokenId++) {
         let owner;
         try { owner = await cardContract.ownerOf(tokenId); } catch { break; }
@@ -394,10 +397,13 @@ export default function App() {
           const metadata = await fetchMetadata(uri);
           const listingRaw = await marketplaceContract.listings(tokenId);
           const listing = listingRaw.price > 0n ? listingRaw : null;
+          // Only count cards that are actively listed for sale
+          if (listing) totalValue += listing.price;
           owned.push({ tokenId, uri, metadata, listing });
         }
       }
       setMyCards(owned);
+      setEstimatedValue(totalValue);
       setStatusMsg("");
     } catch (e) {
       console.error(e);
@@ -672,7 +678,11 @@ export default function App() {
                     </div>
                     <div className="bg-surface-container-lowest p-step-4 shadow-[inset_2px_2px_0px_#0c0e14,inset_-1px_-1px_0px_#33353b] flex flex-col gap-step-px">
                       <span className="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">ESTIMATED VALUE</span>
-                      <div className="flex items-baseline gap-step-2 mt-step-2"><span className="font-headline-md text-headline-md text-primary">0.00</span><span className="font-label-sm text-label-sm text-on-surface-variant">ETH</span></div>
+                      <div className="flex items-baseline gap-step-2 mt-step-2">
+                        <span className="font-headline-md text-headline-md text-primary">{parseFloat(ethers.formatEther(estimatedValue)).toFixed(2)}</span>
+                        <span className="font-label-sm text-label-sm text-on-surface-variant">ETH</span>
+                      </div>
+                      <span className="font-label-sm text-label-sm text-on-surface-variant mt-step-px" style={{ fontSize: "0.65rem", opacity: 0.75 }}>Total value of your currently listed cards</span>
                     </div>
                     <div className="bg-surface-container-lowest p-step-4 shadow-[inset_2px_2px_0px_#0c0e14,inset_-1px_-1px_0px_#33353b] flex flex-col gap-step-px">
                       <span className="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-widest">BOUND SPECIMENS</span>
