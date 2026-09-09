@@ -317,6 +317,7 @@ export default function App() {
   const [listings, setListings] = useState([]);
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
+  const [listingsError, setListingsError] = useState(null);
   const [revealedCards, setRevealedCards] = useState(null);
   const [summonAmount, setSummonAmount] = useState(1);
   const [estimatedValue, setEstimatedValue] = useState(0n);
@@ -350,6 +351,53 @@ export default function App() {
   async function fetchMetadata(tokenURI) {
     try { return await (await fetch(ipfsToUrl(tokenURI))).json(); }
     catch (e) { console.error(e); return null; }
+  }
+
+  /**
+   * Returns true when the error is a genuine ERC-721 "token does not exist"
+   * revert (expected end-of-token-range signal), false for everything else
+   * (network issues, rate-limits, timeouts, etc.).
+   */
+  function isTokenNotExistError(e) {
+    // ethers v6 surfaces contract reverts with error.code === "CALL_EXCEPTION"
+    // and the custom error name in error.errorName / error.reason
+    const name = e?.errorName || e?.reason || "";
+    if (/ERC721NonexistentToken/i.test(name)) return true;
+    if (/nonexistent token/i.test(e?.message)) return true;
+    // Some RPC nodes return the revert string directly
+    if (/invalid token/i.test(e?.message)) return true;
+    // Some RPC nodes (e.g. publicnode) return a CALL_EXCEPTION with
+    // "execution reverted (unknown custom error)" when they can't decode the
+    // ERC-721 custom error from the ABI.  Any CALL_EXCEPTION on ownerOf()
+    // is a contract-level revert — i.e. the token doesn't exist — not a
+    // network/transport error, so treat it as end-of-tokens.
+    if (e?.code === "CALL_EXCEPTION") return true;
+    if (/execution reverted/i.test(e?.message)) return true;
+    return false;
+  }
+
+  /**
+   * Calls `fn` up to 1 + maxRetries times, waiting `baseDelayMs * attempt`
+   * between retries.  Only retries on non-token-not-exist errors.
+   */
+  async function rpcCallWithRetry(fn, maxRetries = 2, baseDelayMs = 500) {
+    let lastErr;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (e) {
+        lastErr = e;
+        // If this is a genuine "token doesn't exist" revert, surface it immediately
+        // so the caller can break out of the token-scan loop cleanly.
+        if (isTokenNotExistError(e)) throw e;
+        // Otherwise it's a network/RPC error — log and retry
+        console.warn(`[RPC] Attempt ${attempt + 1} failed:`, e?.message || e);
+        if (attempt < maxRetries) {
+          await new Promise((res) => setTimeout(res, baseDelayMs * (attempt + 1)));
+        }
+      }
+    }
+    throw lastErr;
   }
 
   async function summon(count) {
@@ -391,7 +439,19 @@ export default function App() {
       let totalValue = 0n;
       for (let tokenId = 0; tokenId < 1000; tokenId++) {
         let owner;
-        try { owner = await cardContract.ownerOf(tokenId); } catch { break; }
+        try {
+          // Retry on network errors; only break for genuine nonexistent-token reverts
+          owner = await rpcCallWithRetry(() => cardContract.ownerOf(tokenId));
+        } catch (e) {
+          if (isTokenNotExistError(e)) {
+            // Expected end of minted range — stop scanning
+            break;
+          }
+          // Persistent network failure for this token — log and skip rather than
+          // silently truncating the whole list
+          console.error(`[loadMyCards] ownerOf(${tokenId}) failed after retries:`, e);
+          continue;
+        }
         if (owner.toLowerCase() === account.toLowerCase()) {
           const uri = await cardContract.tokenURI(tokenId);
           const metadata = await fetchMetadata(uri);
@@ -414,6 +474,7 @@ export default function App() {
 
   async function loadListings() {
     setLoading(true);
+    setListingsError(null);
     setStatusMsg("Loading marketplace...");
     try {
       let providerOrSigner = signer;
@@ -421,13 +482,38 @@ export default function App() {
         if (window.ethereum) {
           providerOrSigner = new ethers.BrowserProvider(window.ethereum);
         } else {
-          providerOrSigner = new ethers.JsonRpcProvider(import.meta.env.VITE_SEPOLIA_RPC_URL || "https://rpc.sepolia.org");
+          // Use the configured RPC URL (publicnode is more reliable than rpc.sepolia.org)
+          providerOrSigner = new ethers.JsonRpcProvider(
+            import.meta.env.VITE_SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com"
+          );
         }
       }
       const { cardContract, marketplaceContract } = getContracts(providerOrSigner);
       const found = [];
+      let consecutiveNetworkFailures = 0;
       for (let tokenId = 0; tokenId < 1000; tokenId++) {
-        try { await cardContract.ownerOf(tokenId); } catch { break; }
+        try {
+          // Retry on transient network errors; only break on genuine nonexistent-token reverts
+          await rpcCallWithRetry(() => cardContract.ownerOf(tokenId));
+          consecutiveNetworkFailures = 0; // reset on success
+        } catch (e) {
+          if (isTokenNotExistError(e)) {
+            // Expected end of minted token range — stop scanning
+            break;
+          }
+          // Persistent RPC failure even after retries
+          consecutiveNetworkFailures++;
+          console.error(`[loadListings] ownerOf(${tokenId}) failed after retries:`, e);
+          // If 3 consecutive tokens fail it's almost certainly an RPC outage, not
+          // missing tokens.  Surface an error rather than returning an empty list.
+          if (consecutiveNetworkFailures >= 3) {
+            throw new Error(
+              `RPC provider unreachable after ${consecutiveNetworkFailures} consecutive failures. ` +
+              `Last error: ${e?.message || e}`
+            );
+          }
+          continue; // skip this token, try the next
+        }
         const listing = await marketplaceContract.listings(tokenId);
         if (listing.price > 0n) {
           const uri = await cardContract.tokenURI(tokenId);
@@ -438,8 +524,11 @@ export default function App() {
       setListings(found);
       setStatusMsg("");
     } catch (e) {
-      console.error(e);
-      setStatusMsg("Failed to load marketplace.");
+      console.error("[loadListings] Fatal error:", e);
+      setListingsError(
+        "Unable to load marketplace — network issue with RPC provider. Please try again."
+      );
+      setStatusMsg("");
     }
     setLoading(false);
   }
@@ -638,7 +727,21 @@ export default function App() {
                   </div>
                 </div>
 
-                {listings.length === 0 && !loading && (
+                {listingsError && (
+                  <div className="w-full bg-surface-container-low border border-outline-variant p-step-4 shadow-[inset_1px_1px_0px_#4e4635,inset_-1px_-1px_0px_#0c0e14] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-step-4">
+                    <div className="flex items-center gap-step-3">
+                      <span className="font-label-sm text-label-sm text-secondary font-bold">[!]</span>
+                      <span className="font-label-sm text-label-sm text-on-surface uppercase tracking-wider">{listingsError}</span>
+                    </div>
+                    <button
+                      onClick={loadListings}
+                      className={`px-step-4 py-step-2 font-label-md text-label-md uppercase tracking-wider text-center ${btnEnabled}`}
+                    >
+                      [ RETRY ]
+                    </button>
+                  </div>
+                )}
+                {!listingsError && listings.length === 0 && !loading && (
                   <p className="font-label-sm text-label-sm text-on-surface-variant">No cards currently listed for sale.</p>
                 )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-step-6 items-start justify-items-center">
